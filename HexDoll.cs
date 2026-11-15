@@ -103,7 +103,7 @@ namespace HexDollBuffPlugin
                     {
                         // Berikan damage langsung & efek Shadowflame meski terhalang tembok
                         int hitDir = (proj.velocity.X >= 0) ? 1 : -1;
-                        npc.StrikeNPC(proj.damage, proj.knockBack, hitDir, false, false, false);
+                        npc.StrikeNPC(proj.damage, proj.knockBack, hitDir, false, false, proj.owner);
                         npc.AddBuff(BuffID.ShadowFlame, 180);
                         npc.immune[proj.owner] = 10;
 
