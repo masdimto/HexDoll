@@ -1,9 +1,9 @@
 using System;
+using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.ID;
 using TerrariaApi.Server;
 using TShockAPI;
-using Microsoft.Xna.Framework;
 
 namespace HexDollBuffPlugin
 {
@@ -13,18 +13,21 @@ namespace HexDollBuffPlugin
         public override string Name => "HexDollBuff";
         public override System.Version Version => new System.Version(1, 1, 0);
         public override string Author => "CustomPlugin";
-        public override string Description => "Membuat tentakel Shadowflame Hex Doll menembus blok dan menyerang musuh di balik tembok.";
+        public override string Description => "Membuat seluruh tentakel Shadowflame Hex Doll menembus tembok dan blok sepenuhnya.";
+
+        private int[] castCooldown = new int[Main.maxPlayers];
 
         public HexDollBuff(Main game) : base(game) { }
 
         public override void Initialize()
         {
-            ServerApi.Hooks.ProjectileSetDefaults.Register(this, OnProjectileSetDefaults);
             ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
+            ServerApi.Hooks.ServerJoin.Register(this, OnServerJoin);
+            ServerApi.Hooks.ServerLeave.Register(this, OnServerLeave);
 
-            Commands.ChatCommands.Add(new Command("hexdoll.buff", HexDollInfoCommand, "hexdoll", "hdbuff")
+            Commands.ChatCommands.Add(new Command("hexdoll.buff", CheckStatusCommand, "hexdoll", "hdbuff")
             {
-                HelpText = "Melihat informasi buff Shadowflame Hex Doll."
+                HelpText = "Mengecek status buff Shadowflame Hex Doll."
             });
         }
 
@@ -32,82 +35,107 @@ namespace HexDollBuffPlugin
         {
             if (disposing)
             {
-                ServerApi.Hooks.ProjectileSetDefaults.Deregister(this, OnProjectileSetDefaults);
                 ServerApi.Hooks.GameUpdate.Deregister(this, OnGameUpdate);
+                ServerApi.Hooks.ServerJoin.Deregister(this, OnServerJoin);
+                ServerApi.Hooks.ServerLeave.Deregister(this, OnServerLeave);
             }
             base.Dispose(disposing);
         }
 
-        private void HexDollInfoCommand(CommandArgs args)
+        private void CheckStatusCommand(CommandArgs args)
         {
-            args.Player.SendInfoMessage("[Hex Doll Buff v1.1] Aktif! Tentakel Shadowflame Hex Doll menembus blok.");
+            args.Player.SendSuccessMessage("[HexDollBuff] Aktif! Semua tentakel Shadowflame Hex Doll menembus tembok 100%.");
         }
 
-        private void OnProjectileSetDefaults(SetDefaultsEventArgs<Projectile, int> args)
+        private void OnServerJoin(JoinEventArgs args)
         {
-            Projectile proj = args.Object;
-            if (proj == null)
-                return;
+            if (args.Who >= 0 && args.Who < Main.maxPlayers)
+                castCooldown[args.Who] = 0;
+        }
 
-            if (proj.type == ProjectileID.ShadowFlame)
-            {
-                proj.tileCollide = false;
-                proj.penetrate = -1;
-            }
+        private void OnServerLeave(LeaveEventArgs args)
+        {
+            if (args.Who >= 0 && args.Who < Main.maxPlayers)
+                castCooldown[args.Who] = 0;
         }
 
         private void OnGameUpdate(EventArgs args)
         {
-            for (int i = 0; i < Main.maxProjectiles; i++)
+            // 1. Paksa semua proyektil ShadowFlame yang aktif di server agar tidak hancur oleh dinding
+            for (int p = 0; p < Main.maxProjectiles; p++)
             {
-                Projectile proj = Main.projectile[i];
-                if (proj == null || !proj.active || proj.type != ProjectileID.ShadowFlame)
-                    continue;
-
-                if (proj.owner < 0 || proj.owner >= Main.maxPlayers)
-                    continue;
-
-                TSPlayer tsPlayer = TShock.Players[proj.owner];
-                if (tsPlayer == null || !tsPlayer.Active || !tsPlayer.HasPermission("hexdoll.buff"))
-                    continue;
-
-                // Paksa matikan tabrakan blok di server
-                proj.tileCollide = false;
-
-                // Cek apakah posisi depan tentakel menyentuh blok padat
-                Vector2 nextPos = proj.position + proj.velocity;
-                bool hittingWall = Collision.SolidCollision(nextPos, proj.width, proj.height);
-
-                if (hittingWall && proj.velocity.Length() > 0.5f)
+                Projectile proj = Main.projectile[p];
+                if (proj != null && proj.active && proj.type == ProjectileID.ShadowFlame)
                 {
-                    // Dorong posisi tentakel melewati blok secara paksa di sisi server & sinkronkan ke client
-                    proj.position += proj.velocity * 1.25f;
-                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, proj.whoAmI);
-                }
-
-                // Cek apakah ada musuh di balik tembok dalam jalur tentakel agar tetap kena damage
-                DamageEnemiesBehindWall(proj);
-            }
-        }
-
-        private void DamageEnemiesBehindWall(Projectile proj)
-        {
-            Rectangle projHitbox = new Rectangle((int)proj.position.X - 8, (int)proj.position.Y - 8, proj.width + 16, proj.height + 16);
-
-            for (int n = 0; n < Main.maxNPCs; n++)
-            {
-                NPC npc = Main.npc[n];
-                if (npc != null && npc.active && !npc.friendly && !npc.dontTakeDamage && npc.lifeMax > 5)
-                {
-                    if (npc.immune[proj.owner] <= 0 && projHitbox.Intersects(npc.Hitbox))
+                    if (proj.tileCollide)
                     {
-                        // Berikan damage langsung & efek Shadowflame meski terhalang tembok
-                        int hitDir = (proj.velocity.X >= 0) ? 1 : -1;
-                        npc.StrikeNPC(proj.damage, proj.knockBack, hitDir, false, false, proj.owner);
-                        npc.AddBuff(BuffID.ShadowFlame, 180);
-                        npc.immune[proj.owner] = 10;
+                        proj.tileCollide = false;
+                        proj.netUpdate = true;
+                    }
+                }
+            }
 
-                        NetMessage.SendData((int)PacketTypes.NpcStrike, -1, -1, null, npc.whoAmI, proj.damage, proj.knockBack, hitDir);
+            // 2. Saat pemain menembakkan Shadowflame Hex Doll, salin arah tembakannya menjadi proyektil server-side
+            // agar tetap melaju tembus tembok meskipun proyektil asli client hancur menabrak blok
+            for (int i = 0; i < Main.maxPlayers; i++)
+            {
+                if (castCooldown[i] > 0)
+                    castCooldown[i]--;
+
+                TSPlayer tsPlayer = TShock.Players[i];
+                if (tsPlayer == null || !tsPlayer.Active || tsPlayer.TPlayer == null)
+                    continue;
+
+                if (!tsPlayer.HasPermission("hexdoll.buff"))
+                    continue;
+
+                Player player = tsPlayer.TPlayer;
+                Item heldItem = player.HeldItem;
+
+                if (heldItem != null && heldItem.type == ItemID.ShadowFlameHexDoll && player.controlUseItem && castCooldown[i] <= 0)
+                {
+                    // Cari proyektil ShadowFlame terbaru milik pemain ini untuk meniru sudut & kecepatan tembakannya
+                    int foundCount = 0;
+                    for (int p = 0; p < Main.maxProjectiles; p++)
+                    {
+                        Projectile orig = Main.projectile[p];
+                        if (orig != null && orig.active && orig.owner == i && orig.type == ProjectileID.ShadowFlame && orig.ai[2] != 99f)
+                        {
+                            // Tandai proyektil asli agar tidak disalin dua kali
+                            orig.ai[2] = 99f;
+
+                            int damage = player.GetWeaponDamage(heldItem);
+                            int cloneIdx = Projectile.NewProjectile(
+                                player.GetProjectileSource_Item(heldItem),
+                                orig.Center,
+                                orig.velocity,
+                                ProjectileID.ShadowFlame,
+                                damage,
+                                heldItem.knockBack,
+                                i,
+                                orig.ai[0],
+                                orig.ai[1]
+                            );
+
+                            if (cloneIdx >= 0 && cloneIdx < Main.maxProjectiles)
+                            {
+                                Projectile clone = Main.projectile[cloneIdx];
+                                clone.tileCollide = false;
+                                clone.ai[2] = 99f;
+                                clone.penetrate = 4;
+                                clone.timeLeft = 65;
+                                NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, cloneIdx);
+                            }
+
+                            foundCount++;
+                            if (foundCount >= 3)
+                                break;
+                        }
+                    }
+
+                    if (foundCount > 0)
+                    {
+                        castCooldown[i] = Math.Max(4, heldItem.useTime - 2);
                     }
                 }
             }
